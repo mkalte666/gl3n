@@ -20,6 +20,8 @@ All static methods are strongly pure.
 module gl3n.linalg;
 
 private {
+    import core.simd : simdVectorTemplate = Vector;
+    import core.cpuid : sse, sse2, sse3, sse41, sse42;
     import std.math : isNaN, isInfinity;
     import std.conv : to;
     import std.traits : isIntegral, isFloatingPoint, isStaticArray, isDynamicArray, isImplicitlyConvertible, isArray;
@@ -36,6 +38,33 @@ version(NoReciprocalMul) {
     private enum rmul = true;
 }
 
+version(D_SIMD) {
+    private enum simdAvailable = true;
+} else {
+    private enum simdAvailable = false;
+}
+
+private {
+    /// Helper struct for runtime SSE version support checking
+    static struct SSEInfo {
+        static bool hasMinimalSSE;
+        static bool hasSSE2;
+        static bool hasSSE3;
+        static bool hasSSE41;
+        static bool hasSSE42;
+
+        static this() {
+            version(D_SIMD) {
+                hasMinimalSSE = sse() && sse2();
+                hasSSE2 = sse2();
+                hasSSE3 = sse3();
+                hasSSE41 = sse41();
+                hasSSE42 = sse41();
+            }
+        }
+    }
+}
+
 /// Base template for all vector-types.
 /// Params:
 /// type = all values get stored as this type
@@ -46,13 +75,28 @@ version(NoReciprocalMul) {
 /// alias Vector!(float, 4) vec4;
 /// alias Vector!(real, 2) vec2r;
 /// ---
-struct Vector(type, int dimension_) {
+struct Vector(type, int dimension_, bool hasSimd_=false) {
     static assert(dimension > 0, "0 dimensional vectors don't exist.");
 
     alias type vt; /// Holds the internal type of the vector.
     static const int dimension = dimension_; ///Holds the dimension of the vector.
 
-    vt[dimension] vector; /// Holds all coordinates, length conforms dimension.
+    static const bool hasSimd = hasSimd_ 
+        && simdAvailable 
+        && __traits(compiles,simdVector!vt[4])
+        && dimension <= 4; ///Holds if SIMD acceleration is activated for this vector
+
+    static if(hasSimd) {
+        alias simdt = simdVector!vt[4]; /// Holds the internal type of the simd vector
+        simdt simdtVector; /// Holds all coordinates, length conforms dimension. always takes sizeof(vt[4]) space.
+        
+        /// Retruns the static array representation of the internal simdVector 
+        @property ref inout(vt[dimension]) vector() inout { 
+            return simdVector.array[0..dimension]; 
+        }
+    } else {
+        vt[dimension] vector; /// Holds all coordinates, length conforms dimension.
+    }
 
     /// Returns a pointer to the coordinates.
     @property auto value_ptr() const { return vector.ptr; }
@@ -289,7 +333,11 @@ struct Vector(type, int dimension_) {
     static if(dimension == 4) { void set(vt x, vt y, vt z, vt w) { vector[0] = x; vector[1] = y; vector[2] = z; vector[3] = w; } }
 
     /// Updates the vector with the values from other.
-    void update(Vector!(vt, dimension) other) {
+    void update(Vector!(vt, dimension, false) other) {
+        vector = other.vector;
+    }
+    /// Ditto
+    void update(Vector!(vt, dimension, true) other) {
         vector = other.vector;
     }
 
@@ -554,6 +602,10 @@ struct Vector(type, int dimension_) {
         foreach(index; TupleRange!(0, dimension)) {
             mixin("vector[index]" ~ op ~ "= r.vector[index];");
         }
+    }
+
+    void opAssign(Vector!(vt,dimension,!hasSimd) r) {
+        update(r);
     }
 
     unittest {
