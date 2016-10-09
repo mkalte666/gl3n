@@ -30,6 +30,7 @@ private {
     import std.algorithm : max, min, reduce;
     import gl3n.math : clamp, PI, sqrt, sin, cos, acos, tan, asin, atan2, almost_equal;
     import gl3n.util : is_vector, is_matrix, is_quaternion, TupleRange;
+    import gl3n.ext.simd : SIMD, simdAvailable, nearestSimdDimension;
 }
 
 version(NoReciprocalMul) {
@@ -38,32 +39,6 @@ version(NoReciprocalMul) {
     private enum rmul = true;
 }
 
-version(D_SIMD) {
-    private enum simdAvailable = true;
-} else {
-    private enum simdAvailable = false;
-}
-
-private {
-    /// Helper struct for runtime SSE version support checking
-    static struct SSEInfo {
-        static bool hasMinimalSSE;
-        static bool hasSSE2;
-        static bool hasSSE3;
-        static bool hasSSE41;
-        static bool hasSSE42;
-
-        static this() {
-            version(D_SIMD) {
-                hasMinimalSSE = sse() && sse2();
-                hasSSE2 = sse2();
-                hasSSE3 = sse3();
-                hasSSE41 = sse41();
-                hasSSE42 = sse41();
-            }
-        }
-    }
-}
 
 /// Base template for all vector-types.
 /// Params:
@@ -80,19 +55,18 @@ struct Vector(type, int dimension_, bool hasSimd_=false) {
 
     alias type vt; /// Holds the internal type of the vector.
     static const int dimension = dimension_; ///Holds the dimension of the vector.
-
     static const bool hasSimd = hasSimd_ 
         && simdAvailable 
-        && __traits(compiles,simdVector!vt[4])
-        && dimension <= 4; ///Holds if SIMD acceleration is activated for this vector
+        && __traits(compiles,simdVectorTemplate!(vt[nearestSimdDimension!dimension])); ///Holds if simd acceleration is activated for this vector
 
     static if(hasSimd) {
-        alias simdt = simdVector!vt[4]; /// Holds the internal type of the simd vector
-        simdt simdtVector; /// Holds all coordinates, length conforms dimension. always takes sizeof(vt[4]) space.
-        
+        static const int simdDimension = nearestSimdDimension!dimension;
+        alias simdt = simdVectorTemplate!(vt[simdDimension]); /// Holds the internal type of the simd vector
+        simdt simdVector; /// Holds all coordinates, length conforms dimension. always takes sizeof(vt[4]) space.
+        alias simd = SIMD!(vt,simdDimension); /// Alias for cleaner access to the simd functions
         /// Retruns the static array representation of the internal simdVector 
-        @property ref inout(vt[dimension]) vector() inout { 
-            return simdVector.array[0..dimension]; 
+        @property ref inout(vt[dimension]) vector() inout @trusted { 
+            return (cast(vt[simdDimension])simdVector)[0..dimension]; 
         }
     } else {
         vt[dimension] vector; /// Holds all coordinates, length conforms dimension.
@@ -338,7 +312,11 @@ struct Vector(type, int dimension_, bool hasSimd_=false) {
     }
     /// Ditto
     void update(Vector!(vt, dimension, true) other) {
-        vector = other.vector;
+        static if(hasSimd) {
+            simd.assign(simdVector,other.simdVector);
+        } else {
+            vector = other.vector;
+        }
     }
 
     unittest {
@@ -425,10 +403,10 @@ struct Vector(type, int dimension_, bool hasSimd_=false) {
 
     /// Implements dynamic swizzling.
     /// Returns: a Vector
-    @property Vector!(vt, s.length) opDispatch(string s)() const {
+    @property Vector!(vt, s.length,hasSimd) opDispatch(string s)() const {
         vt[s.length] ret;
         dispatchImpl!(0, s)(ret);
-        Vector!(vt, s.length) ret_vec;
+        Vector!(vt, s.length,hasSimd) ret_vec;
         ret_vec.vector = ret;
         return ret_vec;
     }
@@ -448,9 +426,13 @@ struct Vector(type, int dimension_, bool hasSimd_=false) {
     /// Returns the squared magnitude of the vector.
     @property real magnitude_squared() const {
         real temp = 0;
-
-        foreach(index; TupleRange!(0, dimension)) {
-            temp += vector[index]^^2;
+        
+        static if(hasSimd&&simd.hasMagnitudeSquared) {
+            temp = simd.magnitude_squared(simdVector);
+        } else {
+            foreach(index; TupleRange!(0, dimension)) {
+                temp += vector[index]^^2;
+            }
         }
 
         return temp;
@@ -458,7 +440,11 @@ struct Vector(type, int dimension_, bool hasSimd_=false) {
 
     /// Returns the magnitude of the vector.
     @property real magnitude() const {
-        return sqrt(magnitude_squared);
+        static if(hasSimd&&simd.hasMagnitude) {
+            return simd.magnitude(simdVector);
+        } else {
+            return sqrt(magnitude_squared);
+        }
     }
 
     alias magnitude_squared length_squared; /// ditto
@@ -527,11 +513,15 @@ struct Vector(type, int dimension_, bool hasSimd_=false) {
 
     Vector opBinary(string op)(Vector r) const if((op == "+") || (op == "-")) {
         Vector ret;
-
-        foreach(index; TupleRange!(0, dimension)) {
-            ret.vector[index] = mixin("vector[index]" ~ op ~ "r.vector[index]");
+        static if(hasSimd&&simd.hasAdd&&simd.hasSub) {
+            mixin("ret.simdVector = simd." 
+                   ~ op=="+" ? "add" : "sub" 
+                   ~ "(simdVector,r.simdVector);");
+        } else {
+            foreach(index; TupleRange!(0, dimension)) {
+                ret.vector[index] = mixin("vector[index]" ~ op ~ "r.vector[index]");
+            }
         }
-
         return ret;
     }
 
@@ -599,8 +589,14 @@ struct Vector(type, int dimension_, bool hasSimd_=false) {
     }
 
     void opOpAssign(string op)(Vector r) if((op == "+") || (op == "-")) {
-        foreach(index; TupleRange!(0, dimension)) {
-            mixin("vector[index]" ~ op ~ "= r.vector[index];");
+        static if(hasSimd&&simd.hasAddSto&&simd.hasSubSto) {
+            const string sto = op=="+" ? "addSto" : "subSto";
+            mixin("simd." ~ sto 
+                   ~ "(simdVector,r.simdVector);");
+        } else {
+            foreach(index; TupleRange!(0, dimension)) {
+                mixin("vector[index]" ~ op ~ "= r.vector[index];");
+            }
         }
     }
 
