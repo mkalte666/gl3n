@@ -24,7 +24,7 @@ private {
     }
 }
 
-private void is_vector_impl(T, int d)(Vector!(T, d) vec) {}
+private void is_vector_impl(T, int d, bool s)(Vector!(T, d, s) vec) {}
 
 /// If T is a vector, this evaluates to true, otherwise false.
 template is_vector(T) {
